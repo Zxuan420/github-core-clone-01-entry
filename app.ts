@@ -1,22 +1,21 @@
-// The starter's HTTP surface, exactly as it ships: a health probe and an API root, and a JSON 404
-// for everything else. The contest's real surface — git smart HTTP, REST v3 resources, GraphQL v4 and
-// the MCP endpoint — is what you add (README.md names it, and the rules link below says what scores).
-//
-// app.ts is deliberately separate from main.ts: this is the server, the file you grow; main.ts is the
-// entry <-> env lifecycle and should stay as it is.
-
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { handleRest } from './rest.ts';
+import { randomBytes } from 'node:crypto';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 
-/** Answer one request with a JSON body; `headers` go beside the JSON ones. */
 function sendJson(res: ServerResponse, status: number, body: unknown, headers: Readonly<Record<string, string>> = {}): void {
+  const requestId = randomBytes(8).toString('hex');
   const text = `${JSON.stringify(body)}\n`;
-  res.writeHead(status, { 'content-type': JSON_TYPE, 'content-length': Buffer.byteLength(text), ...headers });
+  res.writeHead(status, {
+    'content-type': JSON_TYPE,
+    'content-length': Buffer.byteLength(text),
+    'X-GitHub-Request-Id': requestId,
+    ...headers,
+  });
   res.end(text);
 }
 
-/** The path of a request URL, or '/' when it does not parse (never a throw from a request). */
 function pathOf(req: IncomingMessage): string {
   try {
     return new URL(req.url ?? '/', 'http://entry').pathname;
@@ -25,25 +24,43 @@ function pathOf(req: IncomingMessage): string {
   }
 }
 
-/** Build the server. It binds nothing until the caller listens; the entry listens on an ephemeral port. */
 export function createApp(): Server {
   return createServer((req: IncomingMessage, res: ServerResponse) => {
-    const path = pathOf(req);
+    const url = new URL(req.url ?? '/', 'http://entry');
+    const path = url.pathname;
     const method = req.method ?? 'GET';
 
-    // The env's boot check calls this twice: 200 {"ok":true}.
+    // Health check
     if (method === 'GET' && path === '/healthz') {
       sendJson(res, 200, { ok: true });
       return;
     }
 
-    // The GitHub API root: a 200 with the token's scopes, as api.github.com answers GET /.
-    if (method === 'GET' && (path === '/api/v3' || path === '/api/v3/')) {
-      sendJson(res, 200, { current_user_url: '/api/v3/user', rate_limit_url: '/api/v3/rate_limit' }, { 'x-oauth-scopes': 'repo, read:org' });
+    // REST v3 API
+    if (path.startsWith('/api/v3')) {
+      const handled = handleRest(req, res, url);
+      if (handled) return;
+    }
+
+    // GraphQL stub
+    if (path === '/api/graphql') {
+      sendJson(res, 200, { data: { viewer: { login: 'forge' } } });
       return;
     }
 
-    // Everything else, every method: GitHub's 404 body.
+    // MCP stub
+    if (path === '/mcp') {
+      sendJson(res, 200, { jsonrpc: '2.0', result: {} });
+      return;
+    }
+
+    // Git smart HTTP placeholder / stub for Session 1
+    if (path.endsWith('.info/refs') || path.includes('/git-upload-pack') || path.includes('/git-receive-pack')) {
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // Default 404
     sendJson(res, 404, { message: 'Not Found' });
   });
 }
