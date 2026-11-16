@@ -193,6 +193,7 @@ export function handleRest(req: IncomingMessage, res: ServerResponse, url: URL):
           globalStore.repoIssues.delete(fullName);
           globalStore.repoPulls.delete(fullName);
           globalStore.repoLabels.delete(fullName);
+          globalStore.repoIssueComments.delete(fullName);
           res.statusCode = 204;
           res.end();
           return;

@@ -32,7 +32,9 @@ export function createApp(): Server {
     const url = new URL(req.url ?? '/', 'http://entry');
     const path = url.pathname;
     const method = req.method ?? 'GET';
-    console.log('[app] incoming:', method, path);
+    if (process.env.FORGE_DEBUG) {
+      console.log('[app] incoming:', method, path);
+    }
 
     // Health check
     if (method === 'GET' && path === '/healthz') {
