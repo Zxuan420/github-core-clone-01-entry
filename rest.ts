@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { globalStore } from './store.ts';
 import type { Repository, Issue, PullRequest, IssueComment, Label } from './store.ts';
+import { VIEWER_LOGIN, VIEWER_ID, VIEWER_NAME, VIEWER_EMAIL } from './viewer.ts';
+import { changedFiles, mergePullRequest, createRepo } from './service.ts';
 import { randomBytes } from 'node:crypto';
 
 export function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
@@ -83,19 +85,18 @@ export function handleRest(req: IncomingMessage, res: ServerResponse, url: URL):
     // 3. GET /api/v3/user
     if (subpath === '/user') {
       if (method === 'GET') {
-        const login = 'forge';
         json({
-          login,
-          id: 1,
+          login: VIEWER_LOGIN,
+          id: VIEWER_ID,
           node_id: 'MDQ6VXNlcjE=',
-          avatar_url: 'https://github.images.example/u/1?v=4',
+          avatar_url: `https://github.images.example/u/${VIEWER_ID}?v=4`,
           gravatar_id: '',
-          url: `https://api.github.com/users/${login}`,
-          html_url: `https://github.com/${login}`,
+          url: `https://api.github.com/users/${VIEWER_LOGIN}`,
+          html_url: `https://github.com/${VIEWER_LOGIN}`,
           type: 'User',
           site_admin: false,
-          name: 'Forge User',
-          email: 'forge@localhost',
+          name: VIEWER_NAME,
+          email: VIEWER_EMAIL,
           public_repos: 30,
           owned_private_repos: 30,
           created_at: '2025-01-01T00:00:00Z',
@@ -107,14 +108,13 @@ export function handleRest(req: IncomingMessage, res: ServerResponse, url: URL):
 
     // 4. GET /api/v3/user/repos and POST /api/v3/user/repos
     if (subpath === '/user/repos') {
-      const login = 'forge';
       if (method === 'GET') {
         const page = parseInt(url.searchParams.get('page') || '1', 10);
         const perPage = parseInt(url.searchParams.get('per_page') || '30', 10);
         
         const userRepos: Repository[] = [];
         for (const repo of globalStore.repos.values()) {
-          if (repo.owner.login.toLowerCase() === login.toLowerCase()) {
+          if (repo.owner.login.toLowerCase() === VIEWER_LOGIN.toLowerCase()) {
             userRepos.push(repo);
           }
         }
@@ -140,48 +140,20 @@ export function handleRest(req: IncomingMessage, res: ServerResponse, url: URL):
             error('Repository name is required', 422);
             return;
         }
-        const fullName = `${login}/${name}`;
+        const fullName = `${VIEWER_LOGIN}/${name}`;
         if (globalStore.repos.has(fullName)) {
           error('Repository already exists', 422);
           return;
         }
 
-        const repoId = ++globalStore.repoIdCounter;
-        const now = new Date().toISOString();
-        const repo: Repository = {
-          id: repoId,
-          node_id: `R_kgD${repoId}`,
-          name,
-          full_name: fullName,
-          owner: { login, id: 1, type: 'User' },
-          private: !!isPrivate,
-          description: description || null,
-          default_branch: 'main',
-          created_at: now,
-          updated_at: now,
-          pushed_at: now,
-          html_url: `https://github.com/${fullName}`,
-          url: `https://api.github.com/repos/${fullName}`,
-          clone_url: `https://github.com/${fullName}.git`,
-          git_url: `git://github.com/${fullName}.git`,
-          ssh_url: `git@github.com:${fullName}.git`,
-          fork: false,
-          has_issues: true,
-          has_projects: true,
-          has_wiki: true,
-          size: 0,
-          open_issues_count: 0,
-          watchers_count: 0,
-          stargazers_count: 0,
-          forks_count: 0,
-          language: null,
-          topics: [],
-          visibility: isPrivate ? 'private' : 'public',
-        };
-
-        globalStore.repos.set(fullName, repo);
-        json(repo, 201);
-        return;
+        try {
+          const repo = createRepo(name, { private: isPrivate, description }, VIEWER_LOGIN);
+          json(repo, 201);
+          return;
+        } catch (err: any) {
+          error(err.message, 422);
+          return;
+        }
       }
     }
 
@@ -872,80 +844,29 @@ export function handleRest(req: IncomingMessage, res: ServerResponse, url: URL):
             }
 
             if (pullSubPath === '/files' && method === 'GET') {
-              // Return list of files changed in pull request (head vs base)
-              json([]);
+              const baseSha = refs.get(`refs/heads/${pull.base.ref}`);
+              if (!baseSha) {
+                json([]);
+                return;
+              }
+              const files = changedFiles(fullName, baseSha, pull.head.sha);
+              json(files);
               return;
             }
 
             if (pullSubPath === '/merge' && method === 'PUT') {
-              // Merge pull request (squash commit onto base branch)
-              const baseRef = pull.base.ref;
-              const baseSha = refs.get(`refs/heads/${baseRef}`);
-              const headSha = pull.head.sha;
-
-              if (!baseSha) {
-                error('Base branch ref missing', 404);
+              try {
+                const resObj = mergePullRequest(fullName, pullNum);
+                json(resObj);
+                return;
+              } catch (err: any) {
+                if (err.message.includes('conflict')) {
+                  error(err.message, 405);
+                } else {
+                  error(err.message, 422);
+                }
                 return;
               }
-
-              // Real 3-way merge conflict check against merge-base
-              const mergeBaseSha = globalStore.findMergeBase(fullName, baseSha, headSha);
-              if (mergeBaseSha) {
-                const baseCommitObj = globalStore.readObject(fullName, baseSha);
-                const headCommitObj = globalStore.readObject(fullName, headSha);
-                const mbCommitObj = globalStore.readObject(fullName, mergeBaseSha);
-
-                if (baseCommitObj && headCommitObj && mbCommitObj) {
-                  let baseTree = '', headTree = '', mbTree = '';
-                  for (const line of baseCommitObj.content.toString('utf8').split('\n')) if (line.startsWith('tree ')) baseTree = line.slice(5).trim();
-                  for (const line of headCommitObj.content.toString('utf8').split('\n')) if (line.startsWith('tree ')) headTree = line.slice(5).trim();
-                  for (const line of mbCommitObj.content.toString('utf8').split('\n')) if (line.startsWith('tree ')) mbTree = line.slice(5).trim();
-
-                  const baseFiles = globalStore.getFilesMap(fullName, baseTree);
-                  const headFiles = globalStore.getFilesMap(fullName, headTree);
-                  const mbFiles = globalStore.getFilesMap(fullName, mbTree);
-
-                  // Check conflicts: if path changed in both base and head relative to mb with different blobs
-                  for (const [path, headBlob] of headFiles) {
-                    const mbBlob = mbFiles.get(path);
-                    const baseBlob = baseFiles.get(path);
-                    if (baseBlob && mbBlob && baseBlob !== mbBlob && headBlob !== baseBlob && headBlob !== mbBlob) {
-                      // Conflict! Same path changed differently on both sides -> 405
-                      error('Merge conflict detected', 405);
-                      return;
-                    }
-                  }
-                }
-              }
-
-              // Perform merge (squash commit: tree is head's tree, parent = baseSha)
-              const headCommitObj = globalStore.readObject(fullName, headSha);
-              let headTreeSha = '';
-              if (headCommitObj && headCommitObj.type === 'commit') {
-                for (const line of headCommitObj.content.toString('utf8').split('\n')) {
-                  if (line.startsWith('tree ')) headTreeSha = line.slice(5).trim();
-                }
-              }
-
-              const mergeCommitSha = globalStore.writeCommit(fullName, {
-                treeSha: headTreeSha,
-                parents: [baseSha],
-                message: `Merge pull request #${pull.number} from ${pull.head.ref}\n\n${pull.title}`,
-              });
-
-              refs.set(`refs/heads/${baseRef}`, mergeCommitSha);
-              pull.merged = true;
-              pull.state = 'closed';
-              pull.merged_at = new Date().toISOString();
-              pull.closed_at = pull.merged_at;
-              pull.merge_commit_sha = mergeCommitSha;
-
-              json({
-                sha: mergeCommitSha,
-                merged: true,
-                message: 'Pull request successfully merged',
-              });
-              return;
             }
 
             if (pullSubPath === '' || pullSubPath === '/') {

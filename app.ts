@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { handleRest } from './rest.ts';
 import { handleGit } from './git.ts';
+import { handleGraphql } from './graphql.ts';
+import { handleMcp } from './mcp.ts';
 import { randomBytes } from 'node:crypto';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
@@ -44,16 +46,16 @@ export function createApp(): Server {
       if (handled) return;
     }
 
-    // GraphQL stub
+    // GraphQL API
     if (path === '/api/graphql') {
-      sendJson(res, 200, { data: { viewer: { login: 'forge' } } });
-      return;
+      const handled = handleGraphql(req, res, url);
+      if (handled) return;
     }
 
-    // MCP stub
+    // MCP endpoint
     if (path === '/mcp') {
-      sendJson(res, 200, { jsonrpc: '2.0', result: {} });
-      return;
+      const handled = handleMcp(req, res, url);
+      if (handled) return;
     }
 
     // Git smart HTTP
