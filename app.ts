@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { handleRest } from './rest.ts';
+import { handleGit } from './git.ts';
 import { randomBytes } from 'node:crypto';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
@@ -29,6 +30,7 @@ export function createApp(): Server {
     const url = new URL(req.url ?? '/', 'http://entry');
     const path = url.pathname;
     const method = req.method ?? 'GET';
+    console.log('[app] incoming:', method, path);
 
     // Health check
     if (method === 'GET' && path === '/healthz') {
@@ -54,10 +56,10 @@ export function createApp(): Server {
       return;
     }
 
-    // Git smart HTTP placeholder / stub for Session 1
-    if (path.endsWith('.info/refs') || path.includes('/git-upload-pack') || path.includes('/git-receive-pack')) {
-      sendJson(res, 200, { ok: true });
-      return;
+    // Git smart HTTP
+    if (path.includes('.git/')) {
+      const handled = handleGit(req, res, url);
+      if (handled) return;
     }
 
     // Default 404
