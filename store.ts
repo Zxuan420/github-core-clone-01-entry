@@ -283,14 +283,16 @@ export class RepoStore {
     while (offset < buf.length) {
       const spaceIdx = buf.indexOf(32, offset); // space ascii 32
       if (spaceIdx === -1) break;
-      const mode = buf.subarray(offset, spaceIdx).toString('utf8');
+      const rawMode = buf.subarray(offset, spaceIdx).toString('utf8');
       const nullIdx = buf.indexOf(0, spaceIdx);
       if (nullIdx === -1) break;
       const name = buf.subarray(spaceIdx + 1, nullIdx).toString('utf8');
       const shaBytes = buf.subarray(nullIdx + 1, nullIdx + 21);
       if (shaBytes.length < 20) break;
       const sha = shaBytes.toString('hex');
-      const type = mode === '040000' ? 'tree' : 'blob';
+      const isTree = rawMode === '040000' || rawMode === '40000';
+      const type = isTree ? 'tree' : 'blob';
+      const mode = isTree ? '040000' : rawMode;
       entries.push({ mode, name, sha, type });
       offset = nullIdx + 21;
     }

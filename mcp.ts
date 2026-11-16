@@ -103,6 +103,11 @@ export function handleMcp(req: IncomingMessage, res: ServerResponse, url: URL): 
         try {
           const toolName = params.name;
           const args = params.arguments || {};
+          const validTools = ['create_repo', 'get_repo', 'create_issue', 'list_issues', 'create_pull_request', 'merge_pull_request', 'get_issue', 'list_pull_requests'];
+          if (!validTools.includes(toolName)) {
+            error = { code: -32602, message: `Unknown tool: ${toolName}` };
+            break;
+          }
           result = executeTool(toolName, args);
         } catch (err: any) {
           result = {

@@ -508,19 +508,16 @@ function executeQuery(query: string, variables: Record<string, any>, errors: any
       }
     }
 
-    // Introspection __type(name:)
-    const typeMatch = query.match(/__type\s*\(\s*name\s*:\s*"([^"]+)"\s*\)/);
-    if (typeMatch) {
-      const typeName = typeMatch[1]!;
-      // Find which alias or field name requested it
-      let fieldKey = typeName;
-      if (query.includes('Issue: __type') || query.includes(': __type(name: "Issue"')) fieldKey = 'Issue';
-      if (query.includes('PullRequest: __type') || query.includes(': __type(name: "PullRequest"')) fieldKey = 'PullRequest';
-      if (query.includes('Repository: __type') || query.includes(': __type(name: "Repository"')) fieldKey = 'Repository';
-      if (query.includes('SearchType: __type') || query.includes(': __type(name: "SearchType"')) fieldKey = 'SearchType';
-
-      const typeObj = getIntrospectionType(typeName);
-      data[fieldKey] = typeObj;
+    // Introspection __type(name:) (support multiple / aliased selections)
+    const typeMatches = [...query.matchAll(/(?:([a-zA-Z0-9_]+)\s*:\s*)?__type\s*\(\s*name\s*:\s*"([^"]+)"\s*\)/g)];
+    if (typeMatches.length > 0) {
+      for (const m of typeMatches) {
+        const alias = m[1];
+        const typeName = m[2]!;
+        const fieldKey = alias || typeName;
+        const typeObj = getIntrospectionType(typeName);
+        data[fieldKey] = typeObj;
+      }
     }
   }
 
