@@ -25,7 +25,6 @@ export function encodeResponseEnd(): Buffer {
 }
 
 export function encodeSideband(band: number, data: Buffer): Buffer {
-  // max payload per chunk is 65515 (65535 - 4 len - 1 band)
   const maxChunk = 65500;
   const chunks: Buffer[] = [];
   let offset = 0;
@@ -89,7 +88,6 @@ export function parseAndStorePackfile(fullName: string, packBuffer: Buffer): voi
     let baseOffset: number | undefined;
 
     if (typeNum === 6) {
-      // OBJ_OFS_DELTA
       let c = packBuffer[offset++]!;
       let val = c & 0x7f;
       while (c & 0x80) {
@@ -99,13 +97,11 @@ export function parseAndStorePackfile(fullName: string, packBuffer: Buffer): voi
       }
       baseOffset = objOffset - val;
     } else if (typeNum === 7) {
-      // OBJ_REF_DELTA
       if (offset + 20 > packBuffer.length) break;
       baseSha = packBuffer.subarray(offset, offset + 20).toString('hex');
       offset += 20;
     }
 
-    // Find zlib compressed data length by trial and error up to trailer
     let inflated: Buffer = Buffer.alloc(0);
     let consumed = 0;
     const maxLen = packBuffer.length - 20 - offset;
@@ -114,9 +110,7 @@ export function parseAndStorePackfile(fullName: string, packBuffer: Buffer): voi
         inflated = zlib.inflateSync(packBuffer.subarray(offset, offset + len));
         consumed = len;
         break;
-      } catch {
-        // continue
-      }
+      } catch {}
     }
     if (consumed === 0) {
       try {
@@ -148,7 +142,6 @@ export function parseAndStorePackfile(fullName: string, packBuffer: Buffer): voi
     }
   }
 
-  // Resolve pending deltas (iterate until all resolved or no progress)
   let unresolved = [...pendingDeltas];
   let progress = true;
   while (unresolved.length > 0 && progress) {
@@ -165,7 +158,6 @@ export function parseAndStorePackfile(fullName: string, packBuffer: Buffer): voi
 
       if (baseObj) {
         const targetContent = applyDelta(baseObj.content, delta.deltaContent);
-        // Determine object type from base or delta instruction (git deltas inherit base object type)
         const targetType = baseObj.type as any;
         const sha = globalStore.writeRawObject(fullName, targetType, targetContent);
         objectsByOffset.set(delta.objOffset, { type: targetType, content: targetContent, sha });
@@ -180,10 +172,8 @@ export function parseAndStorePackfile(fullName: string, packBuffer: Buffer): voi
 
 function applyDelta(base: Buffer, delta: Buffer): Buffer {
   let offset = 0;
-  // Read source size
   let { value: srcSize, newOffset: o1 } = readVarint(delta, offset);
   offset = o1;
-  // Read target size
   let { value: targetSize, newOffset: o2 } = readVarint(delta, offset);
   offset = o2;
 
@@ -193,7 +183,6 @@ function applyDelta(base: Buffer, delta: Buffer): Buffer {
   while (offset < delta.length) {
     const cmd = delta[offset++]!;
     if (cmd & 0x80) {
-      // Copy instruction
       let cpOff = 0;
       let cpSize = 0;
       if (cmd & 0x01) cpOff |= delta[offset++]!;
@@ -210,7 +199,6 @@ function applyDelta(base: Buffer, delta: Buffer): Buffer {
       chunk.copy(target, targetOffset);
       targetOffset += chunk.length;
     } else {
-      // Insert instruction
       const len = cmd & 0x7f;
       const chunk = delta.subarray(offset, offset + len);
       offset += len;
@@ -235,33 +223,67 @@ function readVarint(buf: Buffer, offset: number): { value: number; newOffset: nu
 
 // --- Packfile Generator (Upload-Pack) ---
 
-export function generatePackfile(fullName: string, wantShas: string[]): Buffer {
-  // Collect all reachable objects starting from wantShas
+export function generatePackfile(
+  fullName: string,
+  wantShas: string[],
+  depth?: number,
+  haveShas?: Set<string>
+): { packBuffer: Buffer; shallowShas: string[] } {
   const visited = new Set<string>();
-  const queue = [...wantShas];
+  const traversedCommits = new Set<string>();
+  const shallowBoundaries = new Set<string>();
+  const queue: Array<{ sha: string; commitDepth: number }> = wantShas.map(sha => ({ sha, commitDepth: 0 }));
+  let queueIndex = 0;
 
-  while (queue.length > 0) {
-    const sha = queue.shift()!;
-    if (visited.has(sha)) continue;
-    visited.add(sha);
+  while (queueIndex < queue.length) {
+    const item = queue[queueIndex++]!;
+    const sha = item.sha;
+    const commitDepth = item.commitDepth;
 
     const obj = globalStore.readObject(fullName, sha);
     if (!obj) continue;
 
     if (obj.type === 'commit') {
+      if (traversedCommits.has(sha)) continue;
+      traversedCommits.add(sha);
+
+      const isHave = haveShas && haveShas.has(sha);
+      if (!isHave) {
+        visited.add(sha);
+      }
+
       const text = obj.content.toString('utf8');
+      let treeSha = '';
+      const parents: string[] = [];
       for (const line of text.split('\n')) {
         if (line.startsWith('tree ')) {
-          queue.push(line.slice(5).trim());
+          treeSha = line.slice(5).trim();
         } else if (line.startsWith('parent ')) {
-          queue.push(line.slice(7).trim());
+          parents.push(line.slice(7).trim());
+        }
+      }
+      if (treeSha && !isHave) {
+        queue.push({ sha: treeSha, commitDepth });
+      }
+      if (depth !== undefined && commitDepth + 1 >= depth) {
+        if (!isHave) {
+          shallowBoundaries.add(sha);
+        }
+      } else {
+        for (const p of parents) {
+          queue.push({ sha: p, commitDepth: commitDepth + 1 });
         }
       }
     } else if (obj.type === 'tree') {
+      if (visited.has(sha)) continue;
+      visited.add(sha);
       const entries = globalStore.parseTree(fullName, sha);
       for (const entry of entries) {
-        queue.push(entry.sha);
+        queue.push({ sha: entry.sha, commitDepth });
       }
+    } else {
+      if (visited.has(sha)) continue;
+      visited.add(sha);
     }
   }
 
@@ -286,7 +308,6 @@ export function generatePackfile(fullName: string, wantShas: string[]): Buffer {
     else if (obj.type === 'blob') typeNum = 3;
     else if (obj.type === 'tag') typeNum = 4;
 
-    // Encode type and size
     const headerBytes: number[] = [];
     let size = obj.content.length;
     headerBytes.push(((typeNum & 7) << 4) | (size & 15));
@@ -302,15 +323,16 @@ export function generatePackfile(fullName: string, wantShas: string[]): Buffer {
 
   const packedWithoutChecksum = Buffer.concat(parts);
   const checksum = createHash('sha1').update(packedWithoutChecksum).digest();
-  return Buffer.concat([packedWithoutChecksum, checksum]);
+  return { packBuffer: Buffer.concat([packedWithoutChecksum, checksum]), shallowShas: Array.from(shallowBoundaries) };
 }
 
 // --- Handlers ---
 
 export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
   const pathname = url.pathname;
-  console.log('[git] request:', req.method, pathname);
-  // Match /{owner}/{repo}.git/...
+  if (process.env.FORGE_DEBUG) {
+    console.log('[git] request:', req.method, pathname);
+  }
   const match = pathname.match(/^\/([^/]+)\/([^/]+)\.git(\/.*)?$/);
   if (!match) return false;
 
@@ -319,7 +341,6 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
   const gitSubPath = match[3] || '/';
   const fullName = `${owner}/${repoName}`;
 
-  // Auth check
   const authHeader = req.headers['authorization'];
   const expectedToken = process.env.MAKEFUN_SHOP_TOKEN || '';
   if (expectedToken !== '') {
@@ -334,7 +355,6 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
     res.writeContinue();
   }
 
-  // Repo existence check
   const repo = globalStore.repos.get(fullName);
   if (!repo) {
     res.statusCode = 404;
@@ -344,7 +364,6 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
 
   const method = req.method || 'GET';
 
-  // Async handler wrapper
   (async () => {
     // 1. GET /info/refs
     if (gitSubPath === '/info/refs' && method === 'GET') {
@@ -375,7 +394,7 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
           const headSha = refs.get('refs/heads/main') || refs.get('HEAD') || '0'.repeat(40);
           
           let first = true;
-          const caps = 'side-band-64k agent=git/2.x symref=HEAD:refs/heads/main';
+          const caps = 'side-band-64k shallow agent=git/2.x symref=HEAD:refs/heads/main';
           
           if (refs.size === 0) {
             lines.push(encodePktLine(`${'0'.repeat(40)} capabilities^{}\0${caps}\n`));
@@ -423,7 +442,6 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
         return;
       }
 
-      // Default info/refs (dumb HTTP or generic)
       res.setHeader('Content-Type', 'text/plain');
       res.statusCode = 200;
       res.end('');
@@ -432,22 +450,34 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
 
     // 2. POST /git-upload-pack
     if (gitSubPath === '/git-upload-pack' && method === 'POST') {
-      const protocol = req.headers['git-protocol'] || '';
       const bodyBuf = await readBody(req);
+      let isV2 = false;
+      let checkOffset = 0;
+      if (checkOffset + 4 <= bodyBuf.length) {
+        const lenHex = bodyBuf.subarray(checkOffset, checkOffset + 4).toString('utf8');
+        const len = parseInt(lenHex, 16);
+        if (!isNaN(len) && len > 4) {
+          const pkt = bodyBuf.subarray(checkOffset + 4, checkOffset + len).toString('utf8');
+          if (pkt.startsWith('command=')) {
+            isV2 = true;
+          }
+        }
+      }
 
-      if (protocol.includes('version=2')) {
-        res.setHeader('Content-Type', 'application/x-git-upload-pack-result');
-        res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/x-git-upload-pack-result');
+      res.statusCode = 200;
 
-        // Parse protocol v2 requests (ls-refs, fetch)
-        // Read pkt-lines from bodyBuf
+      if (isV2) {
         let offset = 0;
         const responseBuffers: Buffer[] = [];
-        let wantShas: string[] = [];
 
         while (offset + 4 <= bodyBuf.length) {
           const lenHex = bodyBuf.subarray(offset, offset + 4).toString('utf8');
           if (lenHex === '0000') {
+            offset += 4;
+            continue;
+          }
+          if (lenHex === '0001') {
             offset += 4;
             continue;
           }
@@ -457,12 +487,15 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
           offset += len;
 
           if (pkt === 'command=ls-refs') {
-            // Read args until flush
             while (offset + 4 <= bodyBuf.length) {
               const argLenHex = bodyBuf.subarray(offset, offset + 4).toString('utf8');
               if (argLenHex === '0000') {
                 offset += 4;
                 break;
+              }
+              if (argLenHex === '0001') {
+                offset += 4;
+                continue;
               }
               const argLen = parseInt(argLenHex, 16);
               if (isNaN(argLen) || argLen === 0) break;
@@ -474,24 +507,31 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
               }
             }
 
-            // Output ls-refs result
             const refs = globalStore.getRefs(fullName);
             const headSha = refs.get('refs/heads/main');
             if (headSha) {
-              responseBuffers.push(encodePktLine(`${headSha} refs/heads/main symref-target:refs/heads/main\n`));
+              responseBuffers.push(encodePktLine(`${headSha} HEAD symref-target:refs/heads/main\n`));
+              responseBuffers.push(encodePktLine(`${headSha} refs/heads/main\n`));
             }
             for (const [refName, sha] of refs.entries()) {
-              if (refName === 'refs/heads/main') continue;
+              if (refName === 'refs/heads/main' || refName === 'HEAD') continue;
               responseBuffers.push(encodePktLine(`${sha} ${refName}\n`));
             }
             responseBuffers.push(encodeFlush());
           } else if (pkt === 'command=fetch') {
-            // Read fetch args (want, have, done, etc.)
+            const wantShas: string[] = [];
+            const haveShas = new Set<string>();
+            let depth: number | undefined = undefined;
+
             while (offset + 4 <= bodyBuf.length) {
               const argLenHex = bodyBuf.subarray(offset, offset + 4).toString('utf8');
               if (argLenHex === '0000') {
                 offset += 4;
                 break;
+              }
+              if (argLenHex === '0001') {
+                offset += 4;
+                continue;
               }
               const argLen = parseInt(argLenHex, 16);
               if (isNaN(argLen) || argLen === 0) break;
@@ -500,15 +540,32 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
 
               if (argPkt.startsWith('want ')) {
                 wantShas.push(argPkt.slice(5).trim());
+              } else if (argPkt.startsWith('have ')) {
+                haveShas.add(argPkt.slice(5).trim());
+              } else if (argPkt.startsWith('deepen ')) {
+                depth = parseInt(argPkt.slice(7).trim(), 10);
               }
             }
 
-            // Generate packfile for wants
+            const { packBuffer, shallowShas } = generatePackfile(fullName, wantShas, depth, haveShas);
+
+            if (haveShas.size > 0) {
+              responseBuffers.push(encodePktLine('acknowledgments\n'));
+              responseBuffers.push(encodePktLine('NAK\n'));
+              responseBuffers.push(encodeFlush());
+            }
+
+            if (shallowShas.length > 0) {
+              responseBuffers.push(encodePktLine('shallow-info\n'));
+              for (const s of shallowShas) {
+                responseBuffers.push(encodePktLine(`shallow ${s}\n`));
+              }
+              responseBuffers.push(encodeFlush());
+            }
+
             responseBuffers.push(encodePktLine('packfile\n'));
-            const packfile = generatePackfile(fullName, wantShas);
-            responseBuffers.push(encodeSideband(1, packfile));
+            responseBuffers.push(encodeSideband(1, packBuffer));
             responseBuffers.push(encodeFlush());
-            // omit encodeResponseEnd() if git client expects just flush or packfile end
           }
         }
 
@@ -516,15 +573,19 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
         return;
       } else {
         // v0 upload-pack
-        res.setHeader('Content-Type', 'application/x-git-upload-pack-result');
-        res.statusCode = 200;
-
         let offset = 0;
         const wantShas: string[] = [];
+        const haveShas = new Set<string>();
+        let depth: number | undefined = undefined;
+        let hasDone = false;
 
         while (offset + 4 <= bodyBuf.length) {
           const lenHex = bodyBuf.subarray(offset, offset + 4).toString('utf8');
           if (lenHex === '0000') {
+            offset += 4;
+            continue;
+          }
+          if (lenHex === '0001') {
             offset += 4;
             continue;
           }
@@ -534,16 +595,38 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
           offset += len;
 
           if (pkt.startsWith('want ')) {
-            wantShas.push(pkt.slice(5).trim());
+            wantShas.push(pkt.slice(5).trim().split(/\s+/)[0]);
+          } else if (pkt.startsWith('have ')) {
+            haveShas.add(pkt.slice(5).trim());
+          } else if (pkt.startsWith('deepen ')) {
+            depth = parseInt(pkt.slice(7).trim(), 10);
           } else if (pkt === 'done') {
+            hasDone = true;
             break;
           }
         }
 
+        const { packBuffer, shallowShas } = generatePackfile(fullName, wantShas, depth, haveShas);
         const responseBuffers: Buffer[] = [];
+        for (const s of shallowShas) {
+          responseBuffers.push(encodePktLine(`shallow ${s}\n`));
+        }
+        if (shallowShas.length > 0) {
+          responseBuffers.push(encodeFlush());
+        }
+        // Real git's v0 fetch is a TWO-POST exchange: the client first probes with
+        // wants+deepen (no "done") to learn the shallow list, then re-sends the full
+        // request with "done". The probe response must contain ONLY shallow+flush:
+        // sending NAK and/or the pack in the probe response leaves bytes unread in
+        // the client's buffer, so its next read finds NAK/pack data where it expects
+        // the shallow list and dies "expected shallow list". Only the request that
+        // carries "done" gets NAK + the pack.
+        if (!hasDone) {
+          res.end(Buffer.concat(responseBuffers));
+          return;
+        }
         responseBuffers.push(encodePktLine('NAK\n'));
-        const packfile = generatePackfile(fullName, wantShas);
-        responseBuffers.push(encodeSideband(1, packfile));
+        responseBuffers.push(encodeSideband(1, packBuffer));
         responseBuffers.push(encodeFlush());
 
         res.end(Buffer.concat(responseBuffers));
@@ -565,6 +648,10 @@ export function handleGit(req: IncomingMessage, res: ServerResponse, url: URL): 
         if (lenHex === '0000') {
           offset += 4;
           break;
+        }
+        if (lenHex === '0001') {
+          offset += 4;
+          continue;
         }
         const len = parseInt(lenHex, 16);
         if (isNaN(len) || len === 0) break;
